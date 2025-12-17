@@ -1,4 +1,5 @@
 import os
+import json
 import hashlib
 import hmac
 from fastapi import FastAPI, Request, HTTPException
@@ -31,7 +32,7 @@ async def crypto_webhook(request: Request):
     verify_signature(body, signature)
 
     # 3. قراءة البيانات
-    data = await request.json()
+    data = json.loads(body)
     
     # نحن نهتم فقط بتحديثات الفواتير (Invoice)
     if data.get("update_type") == "invoice_paid":

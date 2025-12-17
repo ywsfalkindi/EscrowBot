@@ -121,7 +121,7 @@ class MessageLog(Base):
 
     id = Column(Integer, primary_key=True)
     deal_id = Column(Integer, ForeignKey("deals.id"), nullable=False)
-    sender_id = Column(BigInteger, nullable=False)
+    sender_id = Column(BigInteger, ForeignKey("users.id"), nullable=False)
 
     # التعديلات الجديدة:
     message_text = Column(Text, nullable=True)  # أصبح اختيارياً لأنه قد يرسل صورة فقط
@@ -130,6 +130,7 @@ class MessageLog(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     deal = relationship("Deal", backref="logs")
+    sender = relationship("User", backref="sent_messages")
 
 
 # دالة لإنشاء الجداول فعلياً
