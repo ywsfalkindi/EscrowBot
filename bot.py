@@ -14,6 +14,8 @@ from telegram.ext import (
 
 # استيراد الخدمات (تأكد أن db_services يحتوي على الدوال الجديدة)
 from db_services import (
+    solve_dispute_by_admin,
+    open_dispute,
     get_or_create_user, 
     add_balance_to_user, 
     create_new_deal,
@@ -408,6 +410,81 @@ async def buyer_confirm_action(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await query.answer("❌ خطأ! لا يمكن إتمام العملية.", show_alert=True)
 
+async def dispute_action_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    # الزر يأتي بصيغة: dispute_105
+    deal_id = int(query.data.split("_")[1])
+    user_id = query.from_user.id
+    
+    # محاولة فتح النزاع في القاعدة
+    if open_dispute(deal_id, user_id):
+        await query.edit_message_text(
+            f"⚠️ **تم رفع حالة نزاع للصفقة #{deal_id}**\n\n"
+            f"🔒 تم تجميد الأموال.\n"
+            f"👮‍♂️ تم استدعاء المشرفين لمراجعة المحادثة.\n\n"
+            f"يرجى الانتظار، سيتواصل معك الدعم قريباً."
+        )
+        
+        # --- إشعار الأدمن (أنت) ---
+        admin_id = os.getenv("ADMIN_ID")
+        if admin_id:
+            try:
+                # نرسل لك رابط حساباتهم لتتكلم معهم
+                deal_details = get_deal_details(deal_id) # دالة قديمة نستفيد منها
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🚨 **إنذار: نزاع جديد!**\n\n"
+                         f"رقم الصفقة: `{deal_id}`\n"
+                         f"المبلغ: {deal_details['amount']}$\n"
+                         f"الأطراف: البائع `{deal_details['seller_id']}` ضد المشتري `{user_id}`\n\n"
+                         f"للحل استخدم الأمر:\n"
+                         f"`/resolve {deal_id} seller` (للبائع)\n"
+                         f"`/resolve {deal_id} buyer` (للمشتري)",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                print(f"Failed to notify admin: {e}")
+                
+    else:
+        await query.answer("❌ لا يمكن فتح نزاع لهذه الصفقة حالياً.", show_alert=True)
+
+async def admin_resolve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    admin_id = os.getenv("ADMIN_ID")
+    
+    # 1. التحقق الأمني: هل أنت المدير؟
+    if user_id != admin_id:
+        # تجاهل المتطفلين
+        return
+
+    try:
+        # الصيغة: /resolve [ID] [winner]
+        deal_id = int(context.args[0])
+        winner = context.args[1].lower() # seller أو buyer
+        
+        if winner not in ['seller', 'buyer']:
+            await update.message.reply_text("❌ خطأ! الفائز يجب أن يكون 'seller' أو 'buyer'.")
+            return
+            
+        # تنفيذ الحكم
+        result = solve_dispute_by_admin(deal_id, winner)
+        
+        if isinstance(result, dict) and result['status'] == "SUCCESS":
+            await update.message.reply_text(f"✅ {result['msg']}")
+            
+            # إبلاغ الطرفين بالحكم النهائي
+            notification = f"⚖️ **حكم المحكمة الرقمية**\n\nبخصوص الصفقة #{deal_id}:\n{result['msg']}"
+            try:
+                await context.bot.send_message(result['buyer_id'], notification)
+                await context.bot.send_message(result['seller_id'], notification)
+            except: pass
+            
+        else:
+            await update.message.reply_text(f"❌ خطأ: {result}")
+
+    except (IndexError, ValueError):
+        await update.message.reply_text("استخدام خاطئ.\nمثال: `/resolve 15 seller`")
+
 # أمر سري لك فقط لشحن رصيدك وتجربة البوت
 async def dev_faucet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -464,6 +541,8 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(manage_deal_handler, pattern="^manage_deal_"))
     app.add_handler(CallbackQueryHandler(seller_delivered_action, pattern="^seller_done_"))
     app.add_handler(CallbackQueryHandler(buyer_confirm_action, pattern="^buyer_confirm_"))
+    app.add_handler(CallbackQueryHandler(dispute_action_handler, pattern="^dispute_"))
+    app.add_handler(CommandHandler("resolve", admin_resolve_command))
     app.add_handler(CommandHandler("faucet", dev_faucet))
 
     print("🚀 البوت يعمل الآن بنظام البائع والمشتري الكامل...")

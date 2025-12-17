@@ -284,3 +284,84 @@ def get_user_active_deals(user_id):
         return results
     finally:
         session.close()
+
+def open_dispute(deal_id, user_id):
+    """
+    يقوم أحد الطرفين برفع حالة 'نزاع'.
+    """
+    session = Session()
+    try:
+        deal = session.query(Deal).filter_by(id=deal_id).first()
+        
+        # 1. هل الصفقة موجودة؟
+        if not deal: return False
+        
+        # 2. هل الشخص الذي ضغط الزر له علاقة بالصفقة؟ (أمان)
+        if user_id not in [deal.buyer_id, deal.seller_id]:
+            return False
+
+        # 3. هل الصفقة في حالة تسمح بالنزاع؟ (يجب أن تكون نشطة أو مسلمة)
+        if deal.status not in [DealStatus.ACTIVE, DealStatus.DELIVERED]:
+            return False
+
+        # 4. تغيير الحالة وتجميد كل شيء
+        deal.status = DealStatus.DISPUTE
+        session.commit()
+        return True
+        
+    except Exception as e:
+        print(f"Error opening dispute: {e}")
+        session.rollback()
+        return False
+    finally:
+        session.close()
+
+def solve_dispute_by_admin(deal_id, winner_role):
+    """
+    الأدمن يقرر الفائز:
+    - winner_role = 'seller' -> المال يذهب للبائع (إتمام الصفقة).
+    - winner_role = 'buyer'  -> المال يعود للمشتري (إلغاء الصفقة).
+    """
+    session = Session()
+    try:
+        deal = session.query(Deal).filter_by(id=deal_id).first()
+        
+        # التأكد أن الصفقة في حالة نزاع فعلاً
+        if not deal or deal.status != DealStatus.DISPUTE:
+            return "NOT_DISPUTE"
+
+        # جلب أطراف النزاع
+        seller = session.query(User).filter_by(id=deal.seller_id).first()
+        buyer = session.query(User).filter_by(id=deal.buyer_id).first()
+
+        # --- السيناريو 1: الحكم للبائع ---
+        if winner_role == "seller":
+            # نحسب العمولة كالمعتاد
+            fee = int(deal.amount_cents * 0.05)
+            net_profit = deal.amount_cents - fee
+            
+            seller.balance_cents += net_profit # إضافة المال للبائع
+            deal.status = DealStatus.COMPLETED # إغلاق كصفقة ناجحة
+            
+            msg = "تم الحكم لصالح البائع."
+
+        # --- السيناريو 2: الحكم للمشتري ---
+        elif winner_role == "buyer":
+            # نعيد المبلغ كاملاً للمشتري (بدون خصم عمولة عادةً، أو حسب سياستك)
+            buyer.balance_cents += deal.amount_cents # استرداد كامل
+            deal.status = DealStatus.CANCELED # إلغاء الصفقة
+            
+            msg = "تم الحكم لصالح المشتري واسترداد المال."
+        
+        else:
+            return "INVALID_WINNER"
+
+        session.commit()
+        return {"status": "SUCCESS", "msg": msg, "buyer_id": deal.buyer_id, "seller_id": deal.seller_id}
+
+    except Exception as e:
+        print(f"Admin Resolve Error: {e}")
+        session.rollback()
+        return "ERROR"
+    finally:
+        session.close()
