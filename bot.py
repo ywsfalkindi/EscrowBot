@@ -218,6 +218,59 @@ async def cancel_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("تم إلغاء العملية.")
     return ConversationHandler.END
 
+async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        # استخراج المبلغ: /deposit 10
+        amount = float(context.args[0])
+        if amount <= 0: raise ValueError
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ خطأ! اكتب الأمر ثم المبلغ.\nمثال: `/deposit 10`")
+        return
+
+    msg = await update.message.reply_text("⏳ جاري إنشاء رابط الدفع...")
+    
+    # استدعاء خدمة الدفع
+    invoice_data = await create_deposit_invoice(user_id, amount)
+    
+    if invoice_data:
+        # حفظ رقم الفاتورة للتحقق
+        context.user_data['invoice_id'] = invoice_data['invoice_id']
+        context.user_data['deposit_amount'] = amount
+
+        keyboard = [
+            [InlineKeyboardButton("🔗 اضغط للدفع", url=invoice_data['pay_url'])],
+            [InlineKeyboardButton("✅ لقد دفعت", callback_data="check_deposit")]
+        ]
+        await msg.edit_text(
+            f"💳 **شحن رصيد: {amount}$**\nصلاحية الرابط 15 دقيقة.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await msg.edit_text("❌ خطأ في بوابة الدفع.")
+
+# دالة التحقق من الدفع (عند ضغط زر "لقد دفعت")
+async def check_deposit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("جاري التحقق...")
+    
+    invoice_id = context.user_data.get('invoice_id')
+    amount = context.user_data.get('deposit_amount')
+    
+    if not invoice_id:
+        await query.edit_message_text("❌ لا توجد عملية معلقة.")
+        return
+
+    status = await check_invoice_status(invoice_id)
+    
+    if status == 'paid':
+        add_balance_to_user(query.from_user.id, amount)
+        await query.edit_message_text(f"✅ **تم الشحن بنجاح!**\nأضيف {amount}$ لرصيدك.")
+    elif status == 'active':
+        await query.edit_message_text("⏳ الفاتورة لم تدفع بعد. حاول مجدداً بعد الدفع.", reply_markup=query.message.reply_markup)
+    else:
+        await query.edit_message_text("❌ انتهت صلاحية الفاتورة.")
+
 async def simple_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -264,6 +317,8 @@ if __name__ == '__main__':
     
     # معالج زر الشحن (مؤقت)
     app.add_handler(CallbackQueryHandler(simple_deposit, pattern="deposit_btn"))
+    app.add_handler(CommandHandler("deposit", deposit_command)) # <-- هام جداً
+    app.add_handler(CallbackQueryHandler(check_deposit_handler, pattern="check_deposit")) # <-- هام جداً
 
     print("🚀 البوت يعمل الآن بنظام البائع والمشتري الكامل...")
     app.run_polling()
