@@ -95,7 +95,7 @@ DB_NAME = "escrow_bot.db"
 engine = create_engine(f"sqlite:///{DB_NAME}", echo=False)
 
 # إنشاء جلسة (Session) للتعامل مع البيانات
-Session = sessionmaker(bind=engine)
+Session = sessionmaker(bind=engine, expire_on_commit=False)
 
 # دالة لإنشاء الجداول فعلياً
 def init_db():

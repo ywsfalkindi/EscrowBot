@@ -31,23 +31,6 @@ def get_or_create_user(telegram_id, full_name, username):
     finally:
         session.close() # أغلق الاتصال دائماً!
 
-def add_balance(telegram_id, amount_in_dollars):
-    session = Session()
-    try:
-        user = session.query(User).filter_by(id=telegram_id).first()
-        if user:
-            # نحول الدولار لسنتات
-            cents = int(amount_in_dollars * 100)
-            user.balance_cents += cents
-            session.commit()
-            print(f"💰 Added {amount_in_dollars}$ to user {telegram_id}")
-            return True
-    except Exception as e:
-        print(f"Error adding balance: {e}")
-    finally:
-        session.close()
-    return False
-
 def create_new_deal(seller_id, amount_dollars, description):
     session = Session()
     try:
@@ -171,4 +154,34 @@ def add_balance_to_user(telegram_id, amount_usd):
         return False
     finally:
         # إغلاق الجلسة لتحرير موارد السيرفر
+        session.close()
+
+def get_deal_details(deal_id):
+    """
+    تجلب تفاصيل الصفقة ليعاينها المشتري قبل الدفع.
+    تعيد قاموساً (Dictionary) أو None إذا لم توجد.
+    """
+    session = Session()
+    try:
+        deal = session.query(Deal).filter_by(id=deal_id).first()
+        
+        if not deal:
+            return None
+            
+        # نحتاج اسم البائع لنعرضه للمشتري (زيادة في الثقة)
+        # بما أننا نستخدم expire_on_commit=False في models.py، يمكننا الوصول للعلاقات
+        seller_name = deal.seller.full_name if deal.seller else "مستخدم غير معروف"
+        
+        return {
+            "id": deal.id,
+            "seller_id": deal.seller_id,
+            "seller_name": seller_name,
+            "amount": deal.amount_cents / 100.0, # تحويل لدولار
+            "description": deal.description,
+            "status": deal.status
+        }
+    except Exception as e:
+        print(f"❌ Error fetching deal details: {e}")
+        return None
+    finally:
         session.close()
