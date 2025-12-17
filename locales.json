@@ -1,0 +1,6 @@
+{
+  "welcome_msg": {
+    "ar": "👋 **مرحباً بك {name}**\nفي بوت الوسيط الآمن 🛡️\n\n📊 **إحصائياتك:**\n💰 الرصيد: `{balance}$`\n⭐ التقييم: **{rating}**\n🆔 رقمك: `{id}`\n\n👇 اختر العملية التي تريد:",
+    "en": "👋 **Welcome {name}**\nTo Secure Escrow Bot 🛡️\n\n📊 **Your Stats:**\n💰 Balance: `{balance}$`\n⭐ Rating: **{rating}**\n🆔 ID: `{id}`\n\n👇 Choose an action:"
+  }
+}
