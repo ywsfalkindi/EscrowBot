@@ -17,8 +17,11 @@ from db_services import (
     get_or_create_user, 
     add_balance_to_user, 
     create_new_deal,
-    get_deal_details,      # دالة جديدة
-    process_deal_payment   # دالة جديدة
+    get_deal_details,      
+    process_deal_payment,
+    get_user_active_deals,
+    mark_deal_delivered,
+    release_deal_funds
 )
 from payment_services import create_deposit_invoice, check_invoice_status
 
@@ -48,7 +51,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [InlineKeyboardButton("📝 إنشاء صفقة (بائع)", callback_data="new_deal_btn")],
-        [InlineKeyboardButton("💸 دفع لصفقة (مشتري)", callback_data="new_pay_btn")], # الزر الجديد
+        [InlineKeyboardButton("💸 دفع لصفقة (مشتري)", callback_data="new_pay_btn")],
+        [InlineKeyboardButton("📂 صفقاتي النشطة", callback_data="my_active_deals")], # <-- هذا هو الزر الناقص
         [InlineKeyboardButton("💳 شحن الرصيد", callback_data="deposit_btn")]
     ]
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -404,6 +408,15 @@ async def buyer_confirm_action(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await query.answer("❌ خطأ! لا يمكن إتمام العملية.", show_alert=True)
 
+# أمر سري لك فقط لشحن رصيدك وتجربة البوت
+async def dev_faucet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    # سنضيف 100 دولار وهمية لرصيدك في القاعدة
+    from db_services import add_balance_to_user
+    add_balance_to_user(user_id, 100)
+    await update.message.reply_text("✅ تم إضافة 100$ رصيد وهمي لمحفظتك داخل البوت بنجاح! يمكنك الآن تجربة الشراء.")
+
+
 if __name__ == '__main__':
     TOKEN = os.getenv("BOT_TOKEN")
     if not TOKEN:
@@ -451,6 +464,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(manage_deal_handler, pattern="^manage_deal_"))
     app.add_handler(CallbackQueryHandler(seller_delivered_action, pattern="^seller_done_"))
     app.add_handler(CallbackQueryHandler(buyer_confirm_action, pattern="^buyer_confirm_"))
+    app.add_handler(CommandHandler("faucet", dev_faucet))
 
     print("🚀 البوت يعمل الآن بنظام البائع والمشتري الكامل...")
     app.run_polling()

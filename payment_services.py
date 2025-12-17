@@ -1,10 +1,16 @@
 # payment_services.py
 import os
 from aiocryptopay import AioCryptoPay, Networks
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # جلب التوكن من ملف .env
 token = os.getenv("CRYPTO_BOT_TOKEN")
 network_env = os.getenv("NETWORK", "testnet")
+
+if token is None:
+    print("❌ خطأ: لم يتم العثور على CRYPTO_BOT_TOKEN في ملف .env")
 
 # تحديد الشبكة (تجريبي أم حقيقي)
 network = Networks.TEST_NET if network_env == 'testnet' else Networks.MAIN_NET
