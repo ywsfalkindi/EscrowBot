@@ -31,6 +31,7 @@ ASK_PRICE, ASK_DESCRIPTION, CONFIRM_DEAL, PAY_ASK_ID, PAY_CONFIRM = range(5)
 
 # --- 1. القائمة الرئيسية ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    [InlineKeyboardButton("📂 صفقاتي النشطة", callback_data="my_active_deals")]
     user = update.effective_user
     db_user = get_or_create_user(user.id, user.full_name, user.username)
     
@@ -276,6 +277,133 @@ async def simple_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.message.reply_text("لشحن الرصيد، استخدم الأمر: `/deposit 10` (استبدل 10 بالمبلغ).")
 
+async def list_deals_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    deals = get_user_active_deals(user_id) # الدالة الجديدة أعلاه
+    
+    if not deals:
+        await query.edit_message_text("📭 لا توجد لديك صفقات نشطة حالياً.")
+        return
+
+    keyboard = []
+    for deal in deals:
+        # شكل الزر: "صفقة #10 - بائع - 50$"
+        btn_text = f"#{deal['id']} | {deal['role']} | {deal['amount']}$"
+        # عند الضغط، نرسل أمر: manage_deal_10
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"manage_deal_{deal['id']}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_home")])
+    
+    await query.edit_message_text(
+        "📂 **صفقاتك الجارية:**\nاضغط على الصفقة لإدارتها.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def manage_deal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # استخراج رقم الصفقة من الزر (manage_deal_105)
+    deal_id = int(query.data.split("_")[2])
+    
+    # جلب التفاصيل
+    deal = get_deal_details(deal_id) # موجودة سابقاً
+    user_id = query.from_user.id
+    
+    if not deal:
+        await query.edit_message_text("❌ الصفقة غير موجودة.")
+        return
+
+    # تحديد هوية المستخدم (بائع أم مشتري؟)
+    is_seller = (user_id == deal['seller_id'])
+    
+    msg = (
+        f"⚙️ **إدارة الصفقة #{deal_id}**\n"
+        f"الحالة: `{deal['status']}`\n"
+        f"المبلغ: {deal['amount']}$\n"
+        f"الوصف: {deal['description']}\n"
+    )
+    
+    keyboard = []
+    
+    if is_seller:
+        if deal['status'] == 'active':
+            msg += "\n💡 **المطلوب:** قم بتنفيذ الخدمة/تسليم السلعة للمشتري (خارج البوت أو في الشات)، ثم اضغط الزر أدناه."
+            keyboard.append([InlineKeyboardButton("🚚 تم التسليم", callback_data=f"seller_done_{deal_id}")])
+        elif deal['status'] == 'delivered':
+            msg += "\n⏳ **ننتظر المشتري:** لقد أبلغت عن التسليم. ننتظر تأكيد المشتري."
+            
+    else: # هو المشتري
+        if deal['status'] == 'active':
+            msg += "\n⏳ **ننتظر البائع:** لم يقم البائع بتسليم الطلب بعد."
+        elif deal['status'] == 'delivered':
+            msg += "\n✅ **البائع أبلغ عن التسليم!**\nتحقق من السلعة/الخدمة. إذا كان كل شيء تمام، اضغط تأكيد."
+            keyboard.append([InlineKeyboardButton("💰 استلمت - حرر المال", callback_data=f"buyer_confirm_{deal_id}")])
+            keyboard.append([InlineKeyboardButton("🚨 مشكلة / نزاع", callback_data=f"dispute_{deal_id}")])
+
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="my_active_deals")])
+    
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def seller_delivered_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    deal_id = int(query.data.split("_")[2])
+    seller_id = query.from_user.id
+    
+    result = mark_deal_delivered(deal_id, seller_id) # دالة القاعدة
+    
+    if result == "SUCCESS" or isinstance(result, dict): # لأننا أعدنا قاموساً
+        await query.answer("✅ تم تحديث الحالة!")
+        # إشعار المشتري
+        buyer_id = result['buyer_id']
+        try:
+            await context.bot.send_message(
+                buyer_id,
+                f"📢 **تحديث بخصوص الصفقة #{deal_id}**\n"
+                f"يخبرنا البائع أنه أتم التسليم.\n"
+                f"يرجى التحقق ثم تأكيد الاستلام من قائمة 'صفقاتي النشطة'."
+            )
+        except: pass
+        
+        # تحديث رسالة البائع
+        await query.edit_message_text("✅ **ممتاز!**\nتم إبلاغ المشتري. سننتظر تأكيده لتحرير أموالك.")
+    else:
+        await query.answer("❌ خطأ! ربما الحالة لا تسمح.", show_alert=True)
+
+
+# 2. المشتري يضغط "تأكيد الاستلام" (تحرير المال)
+async def buyer_confirm_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    deal_id = int(query.data.split("_")[2])
+    buyer_id = query.from_user.id
+    
+    # تحرير الأموال
+    res = release_deal_funds(deal_id, buyer_id) # دالة القاعدة
+    
+    if isinstance(res, dict) and res['status'] == "SUCCESS":
+        await query.edit_message_text(
+            f"✅ **مبروك! تمت الصفقة بنجاح.**\n\n"
+            f"تم تحويل المبلغ للبائع وإغلاق الصفقة.\nشكراً لاستخدامك الوسيط الآمن."
+        )
+        
+        # إشعار البائع بالمال
+        try:
+            await context.bot.send_message(
+                res['seller_id'],
+                f"💵 **مبروك! وصلتك أرباح جديدة.**\n\n"
+                f"تم إكمال الصفقة #{deal_id}.\n"
+                f"المبلغ الصافي: {res['net_amount']}$\n"
+                f"عمولة المنصة: {res['fee']}$\n\n"
+                f"رصيدك الحالي قد تم تحديثه."
+            )
+        except: pass
+    else:
+        await query.answer("❌ خطأ! لا يمكن إتمام العملية.", show_alert=True)
+
 if __name__ == '__main__':
     TOKEN = os.getenv("BOT_TOKEN")
     if not TOKEN:
@@ -319,6 +447,10 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(simple_deposit, pattern="deposit_btn"))
     app.add_handler(CommandHandler("deposit", deposit_command)) # <-- هام جداً
     app.add_handler(CallbackQueryHandler(check_deposit_handler, pattern="check_deposit")) # <-- هام جداً
+    app.add_handler(CallbackQueryHandler(list_deals_handler, pattern="my_active_deals"))
+    app.add_handler(CallbackQueryHandler(manage_deal_handler, pattern="^manage_deal_"))
+    app.add_handler(CallbackQueryHandler(seller_delivered_action, pattern="^seller_done_"))
+    app.add_handler(CallbackQueryHandler(buyer_confirm_action, pattern="^buyer_confirm_"))
 
     print("🚀 البوت يعمل الآن بنظام البائع والمشتري الكامل...")
     app.run_polling()

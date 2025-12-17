@@ -185,3 +185,102 @@ def get_deal_details(deal_id):
         return None
     finally:
         session.close()
+
+def mark_deal_delivered(deal_id, seller_id):
+    """
+    يقوم البائع بتحويل حالة الصفقة إلى 'تم التسليم'.
+    """
+    session = Session()
+    try:
+        # 1. جلب الصفقة والتأكد أن هذا المستخدم هو البائع فعلاً
+        deal = session.query(Deal).filter_by(id=deal_id, seller_id=seller_id).first()
+        
+        if not deal:
+            return "NOT_FOUND" # صفقة غير موجودة أو ليس هو البائع
+            
+        # 2. هل الصفقة في حالة نشطة؟ (لا يمكن تسليم صفقة ملغاة أو منتهية)
+        if deal.status != DealStatus.ACTIVE:
+            return "WRONG_STATUS"
+            
+        # 3. تغيير الحالة
+        deal.status = DealStatus.DELIVERED
+        session.commit()
+        
+        # نعيد ID المشتري لنرسل له تنبيهاً
+        return {"status": "SUCCESS", "buyer_id": deal.buyer_id}
+        
+    except Exception as e:
+        session.rollback()
+        print(f"Error marking delivered: {e}")
+        return "ERROR"
+    finally:
+        session.close()
+
+def release_deal_funds(deal_id, buyer_id):
+    """
+    يقوم المشتري بتأكيد الاستلام، فيتم تحويل المال للبائع بعد خصم العمولة.
+    """
+    session = Session()
+    try:
+        # 1. جلب الصفقة
+        deal = session.query(Deal).filter_by(id=deal_id, buyer_id=buyer_id).first()
+        
+        if not deal:
+            return "NOT_FOUND"
+            
+        # هل الحالة تسمح؟ (يجب أن تكون ACTIVE أو DELIVERED)
+        if deal.status not in [DealStatus.ACTIVE, DealStatus.DELIVERED]:
+            return "WRONG_STATUS"
+            
+        # 2. جلب البائع (لنعطيه المال)
+        seller = session.query(User).filter_by(id=deal.seller_id).first()
+        
+        # --- الحسابات المالية (The Money Logic) ---
+        total_amount = deal.amount_cents
+        
+        # حساب العمولة (مثلاً 5%)
+        # معادلة: المبلغ * 0.05
+        fee_cents = int(total_amount * 0.05) 
+        
+        # المبلغ الصافي للبائع
+        net_amount = total_amount - fee_cents
+        
+        # 3. تنفيذ التحويل (Atomic Transaction)
+        seller.balance_cents += net_amount  # زيادة رصيد البائع
+        deal.status = DealStatus.COMPLETED  # إغلاق الصفقة
+        
+        # (اختياري) يمكنك إضافة جدول للأرباح لتسجيل الـ fee_cents لك
+        
+        session.commit()
+        
+        return {
+            "status": "SUCCESS",
+            "seller_id": seller.id,
+            "net_amount": net_amount / 100.0, # للطباعة
+            "fee": fee_cents / 100.0          # للطباعة
+        }
+        
+    except Exception as e:
+        session.rollback()
+        print(f"Error releasing funds: {e}")
+        return "ERROR"
+    finally:
+        session.close()
+
+def get_user_active_deals(user_id):
+    """تجلب الصفقات التي يكون فيها المستخدم بائعاً أو مشترياً وحالتها نشطة"""
+    session = Session()
+    try:
+        deals = session.query(Deal).filter(
+            ((Deal.seller_id == user_id) | (Deal.buyer_id == user_id)),
+            Deal.status.in_([DealStatus.ACTIVE, DealStatus.DELIVERED])
+        ).all()
+        
+        # استخراج البيانات المهمة فقط
+        results = []
+        for d in deals:
+            role = "بائع" if d.seller_id == user_id else "مشتري"
+            results.append({"id": d.id, "amount": d.amount_cents/100, "role": role, "status": d.status})
+        return results
+    finally:
+        session.close()
