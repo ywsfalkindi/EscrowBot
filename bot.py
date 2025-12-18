@@ -3,6 +3,8 @@ import time
 import os
 import logging
 from dotenv import load_dotenv
+from db_services import check_spam_protection, verify_admin_action
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from decimal import Decimal, InvalidOperation
 from db_services import get_or_create_user, get_user_rating
@@ -44,9 +46,7 @@ ASK_PRICE, ASK_DESCRIPTION, CONFIRM_DEAL, PAY_ASK_ID, PAY_CONFIRM = range(5)
 USER_COOLDOWNS = {}
 
 def is_spamming(user_id):
-    """تتأكد أن المستخدم لا يضغط بسرعة جنونية (حد: 1.5 ثانية)"""
-    now = time.time()
-    last_time = USER_COOLDOWNS.get(user_id, 0)
+    return check_spam_protection(user_id, limit=3, window_seconds=2)
     
     if now - last_time < 1.5:  # إذا ضغط مرة أخرى خلال أقل من ثانية ونصف
         return True
@@ -87,7 +87,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💳 شحن الرصيد", callback_data="deposit_btn")]
     ]
     
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await update.message.reply_text(
+        msg, 
+        reply_markup=InlineKeyboardMarkup(keyboard), 
+        parse_mode='Markdown',
+        disable_web_page_preview=True # <--- إضافة حيوية للأمان
+    )
 
 # ==========================================
 #  نظام البائع (Seller Flow)
@@ -108,14 +113,19 @@ async def start_new_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        price = Decimal(update.message.text)
-        if price <= 0:
-            raise ValueError
-        if price.as_tuple().exponent < -2:
-            await update.message.reply_text(
-                "⚠️ يرجى إدخال مبلغ بمنزلتين عشريتين كحد أقصى (مثال: 10.50)."
-            )
-            return ASK_PRICE
+        raw_price = Decimal(update.message.text)
+        
+        # 1. الحماية من الأرقام السالبة أو الصفر
+        if raw_price <= 0:
+             raise ValueError("السعر يجب أن يكون أكبر من صفر")
+
+        # 2. الفلترة الصارمة للكسور (Rounding Strategy)
+        # هذا السطر يحول أي رقم مثل 10.559 إلى 10.56 ويقطع أي كسور زائدة بدقة
+        price = raw_price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        
+        # (اختياري) إذا كنت تريد رفض الكسور الزائدة بدلاً من تقريبها، احتفظ بالتحقق القديم.
+        # لكن التقريب هنا أكثر سلاسة للمستخدم:
+        
         context.user_data["temp_price"] = price
         await update.message.reply_text("2️⃣ عظيم! الآن أرسل وصفاً مختصراً للصفقة:")
         return ASK_DESCRIPTION
@@ -590,47 +600,58 @@ async def dispute_action_handler(update: Update, context: ContextTypes.DEFAULT_T
     else:
         await query.answer("❌ لا يمكن فتح نزاع لهذه الصفقة حالياً.", show_alert=True)
 
-
 async def admin_resolve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    admin_id = os.getenv("ADMIN_ID")
-
-    # 1. التحقق الأمني: هل أنت المدير؟
-    if user_id != admin_id:
-        # تجاهل المتطفلين
-        return
+    # ملاحظة: admin_id لم نعد نحتاجه بشدة هنا لأننا نعتمد على الجدول وقاعدة البيانات
+    # لكن لا بأس بتركه كطبقة أمان إضافية لو أحببت
 
     try:
-        # الصيغة: /resolve [ID] [winner]
+        # 1. تحليل المدخلات: نتوقع ID ثم الفائز ثم الرمز السري
         deal_id = int(context.args[0])
-        winner = context.args[1].lower()  # seller أو buyer
-
-        if winner not in ["seller", "buyer"]:
-            await update.message.reply_text(
-                "❌ خطأ! الفائز يجب أن يكون 'seller' أو 'buyer'."
-            )
-            return
-
-        # تنفيذ الحكم
-        result = solve_dispute_by_admin(deal_id, winner)
-
-        if isinstance(result, dict) and result["status"] == "SUCCESS":
-            await update.message.reply_text(f"✅ {result['msg']}")
-
-            # إبلاغ الطرفين بالحكم النهائي
-            notification = f"⚖️ **حكم المحكمة الرقمية**\n\nبخصوص الصفقة #{deal_id}:\n{result['msg']}"
-            try:
-                await context.bot.send_message(result["buyer_id"], notification)
-                await context.bot.send_message(result["seller_id"], notification)
-            except:
-                pass
-
-        else:
-            await update.message.reply_text(f"❌ خطأ: {result}")
-
+        winner = context.args[1].lower()
+        pin_input = context.args[2] # الرمز السري
     except (IndexError, ValueError):
-        await update.message.reply_text("استخدام خاطئ.\nمثال: `/resolve 15 seller`")
+        # هذا الـ except يغطي أي نقص في البيانات أو خطأ في الصيغة
+        await update.message.reply_text(
+            "⚠️ **أمان عالي:**\nاستخدم الأمر مع رمز PIN الخاص بك:\n`/resolve [ID] [winner] [PIN]`",
+            parse_mode="Markdown"
+        )
+        return
 
+    # 2. التحقق الأمني الكامل (صلاحية + 2FA)
+    # نستدعي دالة التحقق التي أنشأناها في db_services
+    auth_status = verify_admin_action(user_id, pin_input, required_role="dispute_agent")
+    
+    if auth_status == "NOT_ADMIN":
+        return # تجاهل بصمت (ليس أدمن أصلاً)
+    elif auth_status == "NO_PERMISSION":
+        await update.message.reply_text("⛔ ليس لديك صلاحية حل النزاعات.")
+        return
+    elif auth_status == "WRONG_PIN":
+        await update.message.reply_text("❌ **رمز الأمان (PIN) غير صحيح!**\nتم تسجيل محاولة دخول فاشلة.")
+        return
+
+    # 3. إذا وصلنا هنا، فالأدمن موثوق ومعه الرمز الصحيح
+    if winner not in ["seller", "buyer"]:
+        await update.message.reply_text("❌ الفائز يجب أن يكون 'seller' أو 'buyer'.")
+        return
+
+    # 4. تنفيذ الحكم
+    result = solve_dispute_by_admin(deal_id, winner)
+
+    if isinstance(result, dict) and result["status"] == "SUCCESS":
+        await update.message.reply_text(f"✅ {result['msg']}")
+
+        # إبلاغ الطرفين بالحكم النهائي
+        notification = f"⚖️ **حكم المحكمة الرقمية**\n\nبخصوص الصفقة #{deal_id}:\n{result['msg']}"
+        try:
+            await context.bot.send_message(result["buyer_id"], notification)
+            await context.bot.send_message(result["seller_id"], notification)
+        except:
+            pass
+
+    else:
+        await update.message.reply_text(f"❌ خطأ: {result}")
 
 async def send_deal_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id

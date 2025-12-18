@@ -1,4 +1,5 @@
 import os
+import enum
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -60,6 +61,22 @@ class User(Base):
     def __repr__(self):
         return f"<User(id={self.id}, name={self.full_name}, balance={self.get_balance_display()}$)>"
 
+class AdminRole(str, enum.Enum):
+    SUPER_ADMIN = "super_admin"  # يفعل كل شيء
+    DISPUTE_AGENT = "dispute_agent" # يحل النزاعات فقط
+    FINANCE_AGENT = "finance_agent" # يراقب العمليات المالية
+
+class Admin(Base):
+    __tablename__ = "admins"
+    
+    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    role = Column(Enum(AdminRole), default=AdminRole.DISPUTE_AGENT)
+    
+    # كلمة مرور العمليات الخطيرة (مشفرة)
+    # لا تخزن الـ PIN كما هو أبداً!
+    pin_hash = Column(String, nullable=False) 
+    
+    user = relationship("User")
 
 # 1. تعريف الحالات كثوابت (عشان ما نغلط في الإملاء لاحقاً)
 class DealStatus:
@@ -110,7 +127,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("❌ خطأ: لم يتم العثور على DATABASE_URL في ملف .env")
 
-engine = create_engine(DATABASE_URL, echo=False, pool_size=20, max_overflow=10)
+engine = create_engine(
+    DATABASE_URL, 
+    echo=False, 
+    pool_size=20, 
+    max_overflow=10,
+    isolation_level="SERIALIZABLE" 
+)
 
 # إنشاء جلسة (Session) للتعامل مع البيانات
 Session = sessionmaker(bind=engine, expire_on_commit=False)
@@ -144,12 +167,15 @@ class AuditLog(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, ForeignKey('users.id'), nullable=False)
-    action = Column(String, nullable=False)        # نوع العملية: إيداع، سحب، شراء
-    amount_cents = Column(BigInteger, default=0)   # المبلغ بالسنت
+    action = Column(String, nullable=False)
+    amount_cents = Column(BigInteger, default=0)
     timestamp = Column(DateTime, default=datetime.utcnow)
-    details = Column(String, nullable=True)        # تفاصيل إضافية (مثل رقم الصفقة)
-
-    # علاقة لمعرفة صاحب السجل
+    details = Column(String, nullable=True)
+    
+    # --- التعديلات الجديدة للـ Blockchain ---
+    previous_hash = Column(String, nullable=True) # بصمة السجل السابق
+    current_hash = Column(String, nullable=False) # بصمة هذا السجل
+    
     user = relationship("User", backref="audits")
     
 class Review(Base):

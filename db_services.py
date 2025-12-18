@@ -1,9 +1,35 @@
+import hashlib
+import redis
+import bcrypt
 from models import Session, User
 from models import Deal, DealStatus
 from decimal import Decimal, ROUND_HALF_UP
 from models import MessageLog
 from models import AuditLog
 from models import Review
+from models import Session, User, Deal, DealStatus, MessageLog, AuditLog, Review, Admin, AdminRole
+
+redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
+def check_spam_protection(user_id, limit=5, window_seconds=60):
+    """
+    Rate Limiting 2.0:
+    يسمح بـ 'limit' طلبات خلال 'window_seconds'.
+    يعيد True إذا كان المستخدم محظوراً مؤقتاً.
+    """
+    key = f"rate_limit:{user_id}"
+    try:
+        current_count = redis_client.incr(key)
+        if current_count == 1:
+            # أول مرة: نضع عداد التنازلي
+            redis_client.expire(key, window_seconds)
+            
+        if current_count > limit:
+            return True # سبام!
+        return False
+    except Exception as e:
+        print(f"Redis Error: {e}")
+        return False # في حال تعطل Redis نسمح بالمرور (Fail-open) أو العكس حسب سياستك
 
 def get_or_create_user(telegram_id, full_name, username):
     session = Session() # فتح اتصال
@@ -410,19 +436,43 @@ def get_deal_logs(deal_id):
         session.close()
         
 def log_audit_event(user_id, action, amount_cents, details=""):
-    """دالة مساعدة تسجل أي حركة مالية في الصندوق الأسود"""
+    """
+    تسجل الحركة المالية بنظام Hash Chain (بلوك تشين مصغر).
+    """
     session = Session()
     try:
-        log = AuditLog(
+        # 1. نجلب آخر سجل تم حفظه ونقوم بـ "قفله" لمنع تضارب الكتابة المتزامنة
+        last_log = session.query(AuditLog).order_by(AuditLog.id.desc()).with_for_update().first()
+        
+        # 2. تحديد الـ Hash السابق
+        prev_hash = last_log.current_hash if last_log else "GENESIS_BLOCK_HASH"
+        
+        # 3. تجهيز البيانات للتشفير (String)
+        # ندمج: الهاش السابق + هوية المستخدم + الفعل + المبلغ + الوقت التقريبي
+        # ملاحظة: الوقت نستخدمه للتوقيع ولكن لا نعتمد عليه كلياً في التشفير لتجنب مشاكل الميكرو ثانية
+        raw_data = f"{prev_hash}{user_id}{action}{amount_cents}{details}"
+        
+        # 4. توليد الـ Hash الجديد (SHA256)
+        current_hash = hashlib.sha256(raw_data.encode('utf-8')).hexdigest()
+        
+        # 5. الحفظ
+        new_log = AuditLog(
             user_id=user_id,
             action=action,
             amount_cents=amount_cents,
-            details=details
+            details=details,
+            previous_hash=prev_hash,
+            current_hash=current_hash
         )
-        session.add(log)
+        
+        session.add(new_log)
         session.commit()
+        # print(f"🔒 Audit Logged: {current_hash[:10]}...") 
+        
     except Exception as e:
-        print(f"❌ فشل في تسجيل التدقيق المالي: {e}")
+        print(f"❌ CRITICAL SECURITY ERROR: Failed to log audit: {e}")
+        session.rollback()
+        # هنا يجب مستقبلاً إيقاف البوت لأن النظام المالي لا يعمل بدون رقابة
     finally:
         session.close()
         
@@ -511,3 +561,39 @@ def confirm_invoice_payment(invoice_id, amount_usd, user_id):
         return False
     finally:
         session.close()
+        
+def verify_admin_action(user_id, pin_input, required_role=None):
+    """
+    يتحقق من: 
+    1. هل المستخدم أدمن؟
+    2. هل يملك الصلاحية (Role)؟
+    3. هل الـ PIN صحيح؟
+    """
+    session = Session()
+    try:
+        admin = session.query(Admin).filter_by(user_id=user_id).first()
+        
+        if not admin:
+            return "NOT_ADMIN"
+            
+        if required_role and admin.role != required_role and admin.role != AdminRole.SUPER_ADMIN:
+            return "NO_PERMISSION"
+            
+        # التحقق من الـ PIN (2FA)
+        # pin_input يأتي من رسالة التليجرام، pin_hash مخزن في القاعدة
+        if not bcrypt.checkpw(pin_input.encode('utf-8'), admin.pin_hash.encode('utf-8')):
+            return "WRONG_PIN"
+            
+        return "AUTHORIZED"
+    finally:
+        session.close()
+
+def create_initial_admin(user_id, raw_pin):
+    """دالة مساعدة لإنشاء أول أدمن (تستخدمها أنت مرة واحدة)"""
+    session = Session()
+    # تشفير الـ PIN
+    hashed = bcrypt.hashpw(raw_pin.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    admin = Admin(user_id=user_id, role=AdminRole.SUPER_ADMIN, pin_hash=hashed)
+    session.merge(admin) # merge تنشئ أو تحدث
+    session.commit()
+    session.close()
